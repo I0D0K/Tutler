@@ -1,3 +1,7 @@
+[简体中文](README.md) | **English**
+
+---
+
 # Tutler
 
 Tutler is a local game, video, and image manager for Windows. It brings game executables, videos, and images scattered across your drives into a single interface, with launching, categorization, favorites, and search. All data stays on your machine and works offline.
