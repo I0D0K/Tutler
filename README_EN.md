@@ -98,11 +98,18 @@ All data is stored in your local user directory and is never written into game i
 
 Game files themselves are never copied, moved, or deleted. Removing an entry from the library only deletes the database record.
 
-## Project Structure
+## AI integration
 
-main.py      # Main application: database, scanning, UI, themes, and business logic
-i18n.py      # UI text translations
-tutler-logo.png / tutler.ico  # Application icons
+This integration adds a circular floating AI button to Tutler. Clicking it opens a separate chat panel whose colors follow the launcher's light/dark theme. The assistant UI supports Chinese and English.
+
+The AI UI and model worker live in `ai_assistant.py`. `main.py` only integrates the assistant with the launcher, queries the local game database, and validates launch requests.
+
+Features:
+- General chat and Q&A.
+- List the game library and search by title, category, or tag; view favorites and recently played games.
+- Launch a game already stored in Tutler when the user explicitly asks to launch/open/play it by name. Game names are checked against the local database; model output is never used to execute arbitrary commands or paths.
+- Click the gear button in the chat header to choose OpenAI-compatible local inference server, DeepSeek, or Qwen. DeepSeek/Qwen endpoints are predefined, so users only select a model and enter the relevant API key. The selection is saved and does not need to be repeated for every message.
+- The chat window uses an opaque background to avoid unexpected transparency on Windows.
 
 ## Notes
 

@@ -23,11 +23,13 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QComboBox, QCheckBox, QFileDialog,
     QMessageBox, QDialog, QFormLayout, QDialogButtonBox, QTextEdit,
     QScrollArea, QFrame, QMenu, QButtonGroup, QSizePolicy, QSpacerItem, QColorDialog,
-    QTabWidget, QInputDialog, QScrollArea, QListWidget, QListWidgetItem, QProgressBar
+    QTabWidget, QInputDialog, QScrollArea, QListWidget, QListWidgetItem, QProgressBar,
+    QGraphicsDropShadowEffect
 )
 
 
 from i18n import _tr, set_language
+from ai_assistant import AssistantDialog
 
 
 def _normalize_search_text(value):
@@ -1361,13 +1363,313 @@ class GameShelfWindow(QMainWindow):
         self.video_category_nav_buttons = {}
         self.image_category_nav_buttons = {}
         self.nav_buttons = []
+        self._assistant_dialog = None
+        self.assistant_button = None
         self._build_ui()
+        self._create_ai_floating_button()
         # 应用启动时始终进入“全部游戏”，不自动展开或切换到某个分类。
         self.all_btn.setChecked(True)
         self.change_view("all")
         QTimer.singleShot(300, self._backfill_missing_covers)
         if self.settings.value("auto_scan_steam", False, type=bool):
             QTimer.singleShot(700, self.scan_steam_games)
+
+    def _create_ai_floating_button(self):
+        """创建始终浮在启动器内容之上的圆形 AI 入口。"""
+        self.assistant_button = QPushButton("✦", self)
+        self.assistant_button.setObjectName("AIFloatingButton")
+        self.assistant_button.setFixedSize(62, 62)
+        self.assistant_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.assistant_button.setToolTip("Tutler AI · 点击开始对话" if self.settings.value("language", "zh_CN", type=str) != "en_US" else "Tutler AI · Click to chat")
+        self.assistant_button.setFont(QFont("Segoe UI Symbol", 22, QFont.Weight.Bold))
+        self.assistant_button.clicked.connect(self.toggle_ai_assistant)
+        self._style_ai_floating_button()
+        self._position_ai_floating_button()
+        self.assistant_button.show()
+        self.assistant_button.raise_()
+
+    def _style_ai_floating_button(self):
+        button = getattr(self, "assistant_button", None)
+        if button is None:
+            return
+        accent = QColor(getattr(self, "accent_color", "#7867f5"))
+        if not accent.isValid():
+            accent = QColor("#7867f5")
+        accent_hover = accent.lighter(112).name()
+        accent_border = accent.lighter(125).name()
+        button.setStyleSheet(f"""
+            QPushButton#AIFloatingButton {{
+                color: #ffffff;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 {accent.name()}, stop:1 {accent.darker(125).name()});
+                border: 1px solid {accent_border};
+                border-radius: 31px;
+                padding: 0;
+                font-family: "Segoe UI Symbol", "Microsoft YaHei UI", sans-serif;
+                font-size: 25px;
+                font-weight: 800;
+            }}
+            QPushButton#AIFloatingButton:hover {{
+                background: {accent_hover}; border-color: {accent_hover};
+            }}
+            QPushButton#AIFloatingButton:pressed {{
+                background: {accent.darker(115).name()};
+            }}
+        """)
+        shadow = button.graphicsEffect()
+        if not isinstance(shadow, QGraphicsDropShadowEffect):
+            shadow = QGraphicsDropShadowEffect(button)
+            shadow.setBlurRadius(24)
+            shadow.setOffset(0, 5)
+            button.setGraphicsEffect(shadow)
+        shadow_color = QColor(accent)
+        shadow_color.setAlpha(135)
+        shadow.setColor(shadow_color)
+
+    def _position_ai_floating_button(self):
+        button = getattr(self, "assistant_button", None)
+        if button is None:
+            return
+        margin = 24
+        button.move(max(12, self.width() - button.width() - margin),
+                    max(60, self.height() - button.height() - margin))
+        button.raise_()
+
+    def toggle_ai_assistant(self):
+        """Open/close the chat panel without blocking the launcher window."""
+        if self._assistant_dialog is None:
+            self._assistant_dialog = AssistantDialog(
+                self,
+                language=self.settings.value("language", "zh_CN", type=str),
+            )
+        if self._assistant_dialog.isVisible():
+            self._assistant_dialog.hide()
+            return
+        self._assistant_dialog.show_near_button(self.assistant_button)
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        assistant_dialog = getattr(self, "_assistant_dialog", None)
+        if assistant_dialog is not None and assistant_dialog.isVisible():
+            assistant_dialog.position_near_button(self.assistant_button)
+
+    def get_ai_catalog(self):
+        """Return a compact, path-free game catalog as context for the local model."""
+        with db_connect() as conn:
+            rows = conn.execute(
+                "SELECT id, name, category, tags, favorite, play_count FROM games ORDER BY name COLLATE NOCASE"
+            ).fetchall()
+        compact = []
+        for row in rows[:180]:
+            compact.append({
+                "id": int(row["id"]),
+                "name": str(row["name"] or ""),
+                "category": str(row["category"] or "OTHER"),
+                "tags": str(row["tags"] or "")[:100],
+                "favorite": bool(row["favorite"]),
+            })
+        return {"total": len(rows), "games": compact, "truncated": len(rows) > len(compact)}
+
+    def _ai_get_games(self):
+        with db_connect() as conn:
+            return conn.execute("SELECT * FROM games ORDER BY name COLLATE NOCASE").fetchall()
+
+    def _ai_clean_query(self, query):
+        value = str(query or "").strip()
+        for pattern in (
+            r"^(?:(?:请|麻烦|可以|能否|请问)\s*)?(?:帮我\s*)?(?:启动|打开|运行|游玩|玩一下|开始玩)(?:一下|下|游戏)?\s*",
+            r"^(?:(?:please|can you|could you|would you)\s+)?(?:please\s+)?(?:(?:help me)\s+)?(?:launch|start|run|open|play)(?:\s+the game)?\s*",
+            r"^(?:请问|请帮我|帮我|麻烦|请)?(?:搜索|查找|查询|找一下|找找|找|查看)\s*",
+            r"^(?:please\s+)?(?:search(?:\s+for)?|find(?:\s+me)?|look\s+for)\s*",
+        ):
+            value = re.sub(pattern, "", value, flags=re.IGNORECASE)
+        value = value.strip(" ：:，,。.!！?？\"'「」『』《》")
+        value = re.sub(r"(?:游戏库里|我的游戏库里|游戏库中的|游戏库里的|里面的)?(?:游戏有哪些|有哪些游戏)$", "", value).strip()
+        return value
+
+    def _ai_category_code(self, query):
+        cleaned = self._ai_clean_query(query).casefold().replace("游戏", "").strip()
+        aliases = {
+            "动作": "ACT", "action": "ACT", "冒险": "AVG", "adventure": "AVG",
+            "角色扮演": "RPG", "roleplaying": "RPG", "role-playing": "RPG", "rpg": "RPG",
+            "动作角色扮演": "ARPG", "arpg": "ARPG", "日式角色扮演": "JRPG", "jrpg": "JRPG",
+            "大型多人在线": "MMORPG", "mmorpg": "MMORPG", "射击": "FPS", "fps": "FPS",
+            "第一人称射击": "FPS", "第三人称射击": "TPS", "tps": "TPS", "策略": "SLG",
+            "即时战略": "RTS", "rts": "RTS", "模拟": "SIM", "sim": "SIM",
+            "竞速": "RAC", "赛车": "RAC", "rac": "RAC", "体育": "SPG", "spg": "SPG",
+            "解谜": "PUZ", "puzzle": "PUZ", "moba": "MOBA", "肉鸽": "ROGUE",
+            "roguelike": "ROGUE", "独立": "IND", "indie": "IND", "其他": "OTHER", "other": "OTHER",
+        }
+        if cleaned in aliases:
+            return aliases[cleaned]
+        known = {str(value).casefold(): str(value).upper() for value in CATEGORIES}
+        return known.get(cleaned)
+
+    def _ai_search_rows(self, query):
+        """Search the whole local library, independent of the page currently selected."""
+        cleaned = self._ai_clean_query(query)
+        normalized = _normalize_search_text(cleaned)
+        rows = self._ai_get_games()
+        low = cleaned.casefold()
+
+        favorite_terms = ("收藏", "favorites", "favorite", "favourites", "starred")
+        recent_terms = ("最近玩过", "最近游玩", "最近启动", "recently played", "recent games", "last played")
+        if any(term in low for term in favorite_terms):
+            return [row for row in rows if bool(row["favorite"])], cleaned or "favorites"
+        if any(term in low for term in recent_terms):
+            recent = [row for row in rows if str(row["last_played"] or "").strip()]
+            recent.sort(key=lambda row: str(row["last_played"] or ""), reverse=True)
+            return recent, cleaned or "recent games"
+
+        category = self._ai_category_code(cleaned)
+        if category:
+            found = [row for row in rows if str(row["category"] or "").casefold() == category.casefold()]
+            return found, cleaned
+
+        if not normalized:
+            return [], cleaned
+        ranked = []
+        for row in rows:
+            score = _fuzzy_search_score(
+                cleaned,
+                row["name"], row["category"], row["tags"], row["notes"], row["exe_path"],
+            )
+            if score > 0:
+                ranked.append((score, row))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return [row for _score, row in ranked], cleaned
+
+    def _ai_format_games(self, rows, heading, max_items=24):
+        total = len(rows)
+        if not total:
+            return heading + "\n" + ("目前游戏库是空的。先添加游戏或扫描游戏目录吧。" if self.settings.value("language", "zh_CN", type=str) != "en_US" else "Your game library is empty. Add a game or scan a folder first.")
+        language = self.settings.value("language", "zh_CN", type=str)
+        if language == "en_US":
+            lines = [f"{heading} ({total} found):"]
+            for index, row in enumerate(rows[:max_items], 1):
+                details = [str(row["category"] or "OTHER")]
+                if row["favorite"]:
+                    details.append("Favorite")
+                lines.append(f"{index}. {row['name']} · {' · '.join(details)}")
+            if total > max_items:
+                lines.append(f"Showing {max_items} of {total}. Narrow the search to see more.")
+        else:
+            lines = [f"{heading}（共 {total} 款）："]
+            for index, row in enumerate(rows[:max_items], 1):
+                details = [str(row["category"] or "OTHER")]
+                if row["favorite"]:
+                    details.append("已收藏")
+                lines.append(f"{index}. {row['name']} · {' · '.join(details)}")
+            if total > max_items:
+                lines.append(f"仅显示前 {max_items} 款；可以继续按名称、分类或标签缩小范围。")
+        return "\n".join(lines)
+
+    def _ai_find_launch_candidates(self, query):
+        cleaned = self._ai_clean_query(query)
+        query_norm = _normalize_search_text(cleaned)
+        if len(query_norm) < 2:
+            return []
+        candidates = []
+        for row in self._ai_get_games():
+            name = str(row["name"] or "")
+            name_norm = _normalize_search_text(name)
+            if query_norm == name_norm:
+                score = 1.0
+            elif query_norm and query_norm in name_norm:
+                score = 0.98
+            elif len(query_norm) >= 4 and abs(len(name_norm) - len(query_norm)) <= max(2, len(query_norm) // 3):
+                # Launch matching is intentionally stricter than library search: use
+                # whole-title similarity, not broad tag/path or character-overlap hits.
+                score = difflib.SequenceMatcher(None, query_norm, name_norm).ratio()
+                if score < 0.76:
+                    score = 0.0
+            else:
+                score = 0.0
+            if score > 0:
+                candidates.append((score, row))
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates
+
+    def _ai_explicit_launch_request(self, text):
+        """Require a clear launch/play command before any game process is started."""
+        value = str(text or "").strip().casefold()
+        patterns = (
+            r"^(?:(?:请|麻烦|可以|能否|请问)\s*)?(?:帮我\s*)?(?:启动|打开|运行|游玩|玩一下|开始玩)(?:一下|下|游戏)?",
+            r"^(?:(?:please|can you|could you|would you)\s+)?(?:please\s+)?(?:(?:help me)\s+)?(?:launch|start|run|open|play)\b",
+            r"^(?:我想|我要|想要|我想要)\s*(?:玩|启动|打开|运行)",
+            r"^(?:i want to|i'd like to|i wanna)\s+(?:play|launch|start|run|open)\b",
+        )
+        return any(re.search(pattern, value, flags=re.IGNORECASE) for pattern in patterns)
+
+    def handle_ai_action(self, action, query, model_reply="", original_text=""):
+        """Validate and execute only the small set of app-level AI actions."""
+        language = self.settings.value("language", "zh_CN", type=str)
+        english = language == "en_US"
+        if action == "list_games":
+            rows = self._ai_get_games()
+            return self._ai_format_games(
+                rows,
+                "Your Tutler game library" if english else "你的 Tutler 游戏库",
+                max_items=30,
+            )
+
+        if action == "search_games":
+            query = query or original_text
+            rows, cleaned = self._ai_search_rows(query)
+            if not rows:
+                return (
+                    f"No matching games found for “{cleaned}”. Try a title, category (RPG/FPS), or tag."
+                    if english else
+                    f"没有找到与「{cleaned}」匹配的游戏。可以尝试游戏名称、分类（如 RPG、FPS）或标签。"
+                )
+            heading = (f"Matches for “{cleaned}”" if english else f"「{cleaned}」的匹配结果")
+            return self._ai_format_games(rows, heading, max_items=16)
+
+        if action == "launch_game":
+            if not self._ai_explicit_launch_request(original_text):
+                return (
+                    "I won't launch a game unless you clearly ask me to. Try ‘Launch Game Title’."
+                    if english else
+                    "为了避免误启动，请明确说出“启动/打开/玩 + 游戏名称”。当前消息没有被识别为明确的启动指令，所以没有启动任何游戏。"
+                )
+            query = query or original_text
+            clean_target = self._ai_clean_query(query)
+            generic_target = clean_target.casefold().strip() in {"游戏", "game", "a game", "the game", "any game", "任意游戏", "随便一款游戏"}
+            if not clean_target or generic_target or self._ai_category_code(clean_target):
+                return (
+                    "Which game should I launch? Please include a specific game title, not just a genre."
+                    if english else
+                    "你想启动哪一款游戏？请提供具体游戏名称，而不是只说分类或“游戏”。"
+                )
+            candidates = self._ai_find_launch_candidates(clean_target)
+            if not candidates or candidates[0][0] < 0.70:
+                return (
+                    f"I couldn't identify “{query}” in your Tutler library, so nothing was launched. Try the exact game title."
+                    if english else
+                    f"我没有在 Tutler 游戏库中明确找到「{query}」，因此没有启动任何游戏。请试试完整的游戏名称。"
+                )
+            best_score, best_row = candidates[0]
+            if len(candidates) > 1 and best_score >= 0.90 and candidates[1][0] >= best_score - 0.035:
+                names = "、".join(str(item[1]["name"]) for item in candidates[:4])
+                return (
+                    f"I found multiple close matches: {names}. Tell me which title you meant; I haven't launched anything."
+                    if english else
+                    f"找到多个相近的游戏名称：{names}。请告诉我具体要启动哪一款；我还没有启动任何游戏。"
+                )
+            launched = self.launch_game(int(best_row["id"]))
+            if launched:
+                return (
+                    f"Sent the launch request for “{best_row['name']}”."
+                    if english else
+                    f"已向 Tutler 提交「{best_row['name']}」的启动请求。"
+                )
+            return (
+                f"“{best_row['name']}” was not launched. The request may have been cancelled, its path may be invalid, or Steam may not be ready."
+                if english else
+                f"没有成功启动「{best_row['name']}」。可能是取消了启动确认、游戏路径无效，或 Steam 尚未准备好。"
+            )
+
+        return model_reply or ("我可以帮你查询或启动 Tutler 游戏库里的游戏。" if not english else "I can search your Tutler library or launch a game from it.")
 
     def _build_ui(self):
         # 外层使用自绘标题栏，主体仍保留原有 central widget 与全部业务布局。
@@ -2674,6 +2976,9 @@ class GameShelfWindow(QMainWindow):
             if glyph:
                 nav_button.setIcon(self._make_nav_icon(str(glyph)))
         apply_native_titlebar_theme(self)
+        self._style_ai_floating_button()
+        if self._assistant_dialog is not None:
+            self._assistant_dialog.apply_theme()
         if app is not None:
             for top_level in app.topLevelWidgets():
                 if top_level is not self and top_level.isVisible():
@@ -2837,6 +3142,10 @@ class GameShelfWindow(QMainWindow):
             self.refresh_games()
         if getattr(self, "_progress_toasts", None):
             self._position_progress_toasts()
+        self._position_ai_floating_button()
+        assistant_dialog = getattr(self, "_assistant_dialog", None)
+        if assistant_dialog is not None and assistant_dialog.isVisible():
+            assistant_dialog.position_near_button(self.assistant_button)
 
     def show_toast(self, title, message="", duration=3600):
         """Show a short in-app notification without a native title bar or modal popup."""
@@ -3765,12 +4074,12 @@ class GameShelfWindow(QMainWindow):
         with db_connect() as conn:
             game = conn.execute("SELECT * FROM games WHERE id=?", (game_id,)).fetchone()
         if not game:
-            return
+            return False
         path = game["exe_path"]
         is_steam = bool(game["steam_appid"] or path.lower().startswith("steam://rungameid/"))
         if not is_steam and not os.path.isfile(path):
             QMessageBox.warning(self, "找不到游戏", f"文件不存在：\n{path}\n\n如果游戏移动了位置，请编辑游戏并更新路径。")
-            return
+            return False
         if self.settings.value("confirm_launch", False, type=bool):
             answer = QMessageBox.question(
                 self, "启动游戏", f"确定启动「{game['name']}」吗？",
@@ -3778,7 +4087,7 @@ class GameShelfWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes
             )
             if answer != QMessageBox.StandardButton.Yes:
-                return
+                return False
         try:
             args = shlex.split(game["launch_args"] or "", posix=False)
             if is_steam:
@@ -3800,8 +4109,10 @@ class GameShelfWindow(QMainWindow):
                                      "exe_path": path, "steam": is_steam, "committed": 0}
                 self.status_label.setText(f"正在统计「{game['name']}」运行时长…")
             self.refresh_games()
+            return True
         except Exception as exc:
             QMessageBox.critical(self, "启动失败", f"无法启动游戏：\n{exc}\n\nSteam 游戏需要安装并登录 Steam。")
+            return False
 
     def _tick_playtime(self):
         active = getattr(self, "_active_play", None)

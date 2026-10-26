@@ -1,2 +1,2 @@
-PySide6>=6.6
-psutil>=5.9
+PySide6>=6.6.0
+psutil>=5.9.0
