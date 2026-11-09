@@ -116,6 +116,9 @@ def _fallback_intent(user_text: str, fallback_reply: str = "") -> dict[str, Any]
             if cleaned and cleaned not in {"游戏", "game", "the game"}:
                 return {"action": "launch_game", "query": cleaned, "reply": ""}
 
+    if any(term in low for term in ("自动分类", "自动归类", "整理游戏分类", "auto categorize", "automatically categorize")):
+        return {"action": "auto_categorize", "query": "", "reply": ""}
+
     list_markers = (
         "有哪些游戏", "游戏列表", "列出游戏", "全部游戏", "所有游戏", "我的游戏", "我有多少款游戏",
         "游戏库里有什么", "我的游戏库", "list games", "show my games", "what games do i have",
@@ -124,6 +127,15 @@ def _fallback_intent(user_text: str, fallback_reply: str = "") -> dict[str, Any]
     if any(marker in low for marker in list_markers):
         return {"action": "list_games", "query": "", "reply": ""}
 
+    delete_match = re.search(r"(?:从(?:Tutler)?(?:游戏库|库)中)?(?:删除|移除)(?:已录入的游戏|录入的游戏|游戏)?\s*[「『《\"']?(.*?)\s*[」』》\"']?$", text, re.IGNORECASE)
+    if not delete_match or not delete_match.group(1).strip():
+        delete_match = re.search(r"(?:delete|remove)(?:\s+game)?\s+[\"']?(.+?)[\"']?$", text, re.IGNORECASE)
+    if delete_match and delete_match.group(1).strip():
+        return {"action": "delete_game", "query": delete_match.group(1).strip(), "reply": ""}
+
+    category_match = re.search(r"(?:将|把)?\s*[「『《\"']?(.+?)[」』》\"']?\s*(?:分类为|归类为|分类到|设为分类|归到|放到|分到|设为)\s*([A-Za-z]+|动作|冒险|角色扮演|射击|策略|模拟|竞速|体育|解谜|肉鸽|独立|其他)", text, re.IGNORECASE)
+    if category_match:
+        return {"action": "set_category", "query": category_match.group(1).strip(), "category": category_match.group(2).strip(), "reply": ""}
     search_markers = (
         "搜索游戏", "查找游戏", "查询游戏", "找一下", "有没有", "找游戏", "搜索", "查找",
         "search for", "find a game", "find games", "do i have",
@@ -198,11 +210,15 @@ Your supported actions are limited to:
 - chat: general conversation and help; do not perform an app action.
 - list_games: the user asks to list/count games in their Tutler library.
 - search_games: the user asks which installed/library games match a title, genre, tag, or condition.
-- launch_game: the user explicitly asks to start/play/open a game already in the Tutler library.
+- launch_game: explicitly start a game already in the library.
+- set_category: assign one existing game to a category; put its exact title in query and category code in category.
+- auto_categorize: classify the library; return assignments using only catalog IDs and valid category codes.
+- delete_game: remove one existing game record; put its exact title in query.
 
-Return exactly one JSON object and no surrounding explanation, in this schema:
-{{"action":"chat|list_games|search_games|launch_game","query":"short game title/category/tag/condition, or empty","reply":"natural-language response for chat, or a brief optional message"}}
+Return exactly one JSON object:
+{{"action":"chat|list_games|search_games|launch_game|set_category|auto_categorize|delete_game","query":"game title or search term","category":"category code","assignments":[{{"id":1,"category":"RPG"}}],"reply":"natural-language response"}}
 
+Valid category codes: ACT, AVG, RPG, ARPG, JRPG, MMORPG, FPS, TPS, RTS, SLG, SIM, RAC, SPG, PUZ, MUG, MOBA, ROGUE, IND, OTHER. For auto_categorize, classify every game shown in the catalog, return only its existing integer id and one category code; do not invent IDs. For set_category, infer the requested category from the user's wording but never invent the game title.
 Rules:
 1. Choose launch_game ONLY when the user explicitly asks to launch/play/run/open a game. Asking how to launch a game is chat, not an action.
 2. Never invent a game or a file path. Launch requests are checked against the real local library by the app.
@@ -259,12 +275,14 @@ Tutler library context (the app validates all results against its database):
                 result = _fallback_intent(self.user_text, content)
             else:
                 action = str(parsed.get("action", "chat")).strip().lower()
-                if action not in {"chat", "list_games", "search_games", "launch_game"}:
+                if action not in {"chat", "list_games", "search_games", "launch_game", "set_category", "auto_categorize", "delete_game"}:
                     action = "chat"
                 result = {
                     "action": action,
                     "query": str(parsed.get("query", "") or "").strip(),
                     "reply": str(parsed.get("reply", "") or "").strip(),
+                    "category": str(parsed.get("category", "") or "").strip(),
+                    "assignments": parsed.get("assignments", []) if isinstance(parsed.get("assignments", []), list) else [],
                 }
                 # For explicit command phrases, retain basic operation even if a small
                 # local model unexpectedly labels the intent as ordinary conversation.
@@ -272,6 +290,8 @@ Tutler library context (the app validates all results against its database):
                 if fallback.get("action") == "launch_game" and action == "chat":
                     result = fallback
                 elif fallback.get("action") == "list_games" and action == "chat":
+                    result = fallback
+                elif fallback.get("action") not in {"chat", action} and action == "chat":
                     result = fallback
             self.result_ready.emit(result)
         except ImportError as exc:
@@ -534,6 +554,7 @@ class AssistantDialog(QDialog):
         self.avatar.setObjectName("AssistantAvatar")
         self.avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.avatar.setFixedSize(42, 42)
+        self.avatar.setFont(QFont("Segoe UI Symbol", 27, QFont.Weight.Bold))
         header.addWidget(self.avatar)
 
         title_col = QVBoxLayout()
@@ -707,8 +728,14 @@ class AssistantDialog(QDialog):
             }}
             QLabel {{ color: {colors['text']}; background: transparent; border: none; }}
             QLabel#AssistantAvatar {{
-                color: white; font-size: 23px; font-weight: 800;
-                background: {accent_hex}; border-radius: 14px;
+                color: {colors['text']};
+                background: {colors['surface']};
+                border: 1px solid {colors['border']};
+                border-radius: 11px;
+                font-family: "Segoe UI Symbol", "Microsoft YaHei UI", sans-serif;
+                font-size: 27px;
+                font-weight: 800;
+                padding: 0;
             }}
             QLabel#AssistantTitle {{ font-size: 15px; font-weight: 800; }}
             QLabel#AssistantSubtitle {{ color: {colors['muted']}; font-size: 10px; }}
@@ -925,7 +952,11 @@ class AssistantDialog(QDialog):
             final_reply = reply or _ui_text(self.language, "我在这里。你可以问我游戏库相关的问题。", "I'm here. Ask me anything about your game library.")
         else:
             try:
-                final_reply = self.owner.handle_ai_action(action, query, reply, self._pending_user_text)
+                final_reply = self.owner.handle_ai_action(
+                    action, query, reply, self._pending_user_text,
+                    category=str(result.get("category", "") or ""),
+                    assignments=result.get("assignments", []),
+                )
             except Exception as exc:
                 final_reply = _ui_text(self.language, f"处理请求时出错：{exc}", f"Could not process the request: {exc}")
         self._add_message("assistant", final_reply)

@@ -158,7 +158,7 @@ class NativeTitleBarThemeFilter(QObject):
         return False
 
 APP_NAME = "Tutler"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.1.2"
 # Keep the legacy data folder so existing GameShelf installations retain their database/settings.
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "GameShelf"
 APP_ROOT = Path(__file__).resolve().parent
@@ -455,7 +455,7 @@ def download_steam_cover(appid):
     ]
     for url in urls:
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Tutler/0.1.0"})
+            req = urllib.request.Request(url, headers={"User-Agent": "Tutler/0.1.2"})
             with urllib.request.urlopen(req, timeout=8) as response:
                 data = response.read(8 * 1024 * 1024)
             if len(data) > 2048 and data[:2] == b'\xff\xd8':
@@ -1375,14 +1375,15 @@ class GameShelfWindow(QMainWindow):
             QTimer.singleShot(700, self.scan_steam_games)
 
     def _create_ai_floating_button(self):
-        """创建始终浮在启动器内容之上的圆形 AI 入口。"""
+        """创建始终浮在启动器内容之上的灰白方形 AI 入口。"""
         self.assistant_button = QPushButton("✦", self)
         self.assistant_button.setObjectName("AIFloatingButton")
         self.assistant_button.setFixedSize(62, 62)
         self.assistant_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.assistant_button.setToolTip("Tutler AI · 点击开始对话" if self.settings.value("language", "zh_CN", type=str) != "en_US" else "Tutler AI · Click to chat")
-        self.assistant_button.setFont(QFont("Segoe UI Symbol", 22, QFont.Weight.Bold))
+        self.assistant_button.setFont(QFont("Segoe UI Symbol", 32, QFont.Weight.Bold))
         self.assistant_button.clicked.connect(self.toggle_ai_assistant)
+        self.assistant_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._style_ai_floating_button()
         self._position_ai_floating_button()
         self.assistant_button.show()
@@ -1392,39 +1393,45 @@ class GameShelfWindow(QMainWindow):
         button = getattr(self, "assistant_button", None)
         if button is None:
             return
-        accent = QColor(getattr(self, "accent_color", "#7867f5"))
-        if not accent.isValid():
-            accent = QColor("#7867f5")
-        accent_hover = accent.lighter(112).name()
-        accent_border = accent.lighter(125).name()
+        app = QApplication.instance()
+        dark = bool(app.property("gameshelf_dark_mode")) if app else True
+        if dark:
+            bg, fg, border = "#292d34", "#d7dbe2", "#3b414b"
+            hover_bg, hover_fg, hover_border = "#333943", "#f0f2f5", "#515966"
+            pressed_bg = "#22262c"
+        else:
+            bg, fg, border = "#e9ebef", "#424852", "#d9dde4"
+            hover_bg, hover_fg, hover_border = "#dfe3e9", "#292e36", "#cbd1da"
+            pressed_bg = "#d4d9e1"
         button.setStyleSheet(f"""
             QPushButton#AIFloatingButton {{
-                color: #ffffff;
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 {accent.name()}, stop:1 {accent.darker(125).name()});
-                border: 1px solid {accent_border};
-                border-radius: 31px;
+                color: {fg};
+                background: {bg};
+                border: 1px solid {border};
+                border-radius: 15px;
                 padding: 0;
                 font-family: "Segoe UI Symbol", "Microsoft YaHei UI", sans-serif;
-                font-size: 25px;
-                font-weight: 800;
+                font-size: 34px;
+                font-weight: 700;
             }}
             QPushButton#AIFloatingButton:hover {{
-                background: {accent_hover}; border-color: {accent_hover};
+                color: {hover_fg};
+                background: {hover_bg};
+                border: 1px solid {hover_border};
             }}
             QPushButton#AIFloatingButton:pressed {{
-                background: {accent.darker(115).name()};
+                color: {fg};
+                background: {pressed_bg};
+                border: 1px solid {border};
             }}
         """)
         shadow = button.graphicsEffect()
         if not isinstance(shadow, QGraphicsDropShadowEffect):
             shadow = QGraphicsDropShadowEffect(button)
-            shadow.setBlurRadius(24)
-            shadow.setOffset(0, 5)
+            shadow.setBlurRadius(20)
+            shadow.setOffset(0, 4)
             button.setGraphicsEffect(shadow)
-        shadow_color = QColor(accent)
-        shadow_color.setAlpha(135)
-        shadow.setColor(shadow_color)
+        shadow.setColor(QColor(0, 0, 0, 55 if dark else 35))
 
     def _position_ai_floating_button(self):
         button = getattr(self, "assistant_button", None)
@@ -1601,8 +1608,8 @@ class GameShelfWindow(QMainWindow):
         )
         return any(re.search(pattern, value, flags=re.IGNORECASE) for pattern in patterns)
 
-    def handle_ai_action(self, action, query, model_reply="", original_text=""):
-        """Validate and execute only the small set of app-level AI actions."""
+    def handle_ai_action(self, action, query, model_reply="", original_text="", category="", assignments=None):
+        """Validate AI intents against the real local library before changing it."""
         language = self.settings.value("language", "zh_CN", type=str)
         english = language == "en_US"
         if action == "list_games":
@@ -1624,6 +1631,71 @@ class GameShelfWindow(QMainWindow):
                 )
             heading = (f"Matches for “{cleaned}”" if english else f"「{cleaned}」的匹配结果")
             return self._ai_format_games(rows, heading, max_items=16)
+
+        if action == "set_category":
+            target = self._ai_clean_query(query or original_text)
+            category_code = self._ai_category_code(category)
+            if not category_code:
+                return ("Please specify a valid category code." if english else "请指定有效的游戏分类，例如 RPG、FPS 或 ACT。")
+            candidates = self._ai_find_launch_candidates(target)
+            if not candidates or candidates[0][0] < 0.88:
+                return (f"I couldn't identify the game “{target}” accurately; no changes were made." if english else f"无法准确识别游戏「{target}」，没有修改分类。")
+            if len(candidates) > 1 and candidates[1][0] >= candidates[0][0] - 0.04:
+                names = "、".join(str(item[1]["name"]) for item in candidates[:4])
+                return (f"Multiple games match: {names}. Please specify the exact title." if english else f"找到多个相近游戏：{names}。请提供准确名称。")
+            game = candidates[0][1]
+            with db_connect() as conn:
+                conn.execute("UPDATE games SET category=? WHERE id=?", (category_code, int(game["id"])))
+            self.refresh_games()
+            return (f"Set {game['name']} to {category_code}." if english else f"已将「{game['name']}」分类为 {category_code}。")
+
+        if action == "delete_game":
+            target = self._ai_clean_query(query or original_text)
+            candidates = self._ai_find_launch_candidates(target)
+            if not candidates or candidates[0][0] < 0.90:
+                return (f"I couldn't identify “{target}” accurately; nothing was removed." if english else f"无法准确识别游戏「{target}」，没有移除任何记录。")
+            if len(candidates) > 1 and candidates[1][0] >= candidates[0][0] - 0.04:
+                names = "、".join(str(item[1]["name"]) for item in candidates[:4])
+                return (f"Multiple games match: {names}. Please specify the exact title." if english else f"找到多个相近游戏：{names}。请提供准确名称。")
+            game = candidates[0][1]
+            removed = self.delete_game(int(game["id"]))
+            if removed:
+                return (f"Removed {game['name']} from Tutler. Game files were not deleted." if english else f"已从 Tutler 移除「{game['name']}」的记录，没有删除游戏文件。")
+            return ("Removal cancelled; nothing was changed." if english else "已取消移除，没有修改游戏库。")
+
+        if action == "auto_categorize":
+            valid_ids = {int(row["id"]) for row in self._ai_get_games()}
+            clean = {}
+            for item in assignments or []:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    game_id = int(item.get("id"))
+                except (TypeError, ValueError):
+                    continue
+                code = self._ai_category_code(str(item.get("category", "")))
+                if game_id in valid_ids and code and code != "OTHER":
+                    clean[game_id] = code
+            if not clean:
+                return ("No valid category suggestions were returned. No games were changed." if english else "AI 没有给出有效的分类建议，没有修改任何游戏。")
+            preview = []
+            with db_connect() as conn:
+                for game_id, code in clean.items():
+                    row = conn.execute("SELECT name, category FROM games WHERE id=?", (game_id,)).fetchone()
+                    if row and str(row["category"] or "OTHER").upper() != code:
+                        preview.append(f"{row['name']} → {code}")
+            if not preview:
+                return ("All suggested categories already match the library." if english else "建议分类与当前分类一致，无需修改。")
+            title = "Auto-categorize games" if english else "自动分类游戏"
+            question = (f"Apply {len(preview)} category changes?" if english else f"确认应用以下 {len(preview)} 项分类修改吗？")
+            detail = "\n".join(preview[:18]) + ("\n…" if len(preview) > 18 else "")
+            if not self._confirm_action(title, question, detail, confirm_text=("Apply" if english else "应用分类")):
+                return ("Auto-categorization cancelled; no changes were made." if english else "已取消自动分类，没有修改任何游戏。")
+            with db_connect() as conn:
+                for game_id, code in clean.items():
+                    conn.execute("UPDATE games SET category=? WHERE id=?", (code, game_id))
+            self.refresh_games()
+            return (f"Updated {len(preview)} game categories." if english else f"自动分类完成，已更新 {len(preview)} 款游戏。")
 
         if action == "launch_game":
             if not self._ai_explicit_launch_request(original_text):
@@ -4054,7 +4126,7 @@ class GameShelfWindow(QMainWindow):
         with db_connect() as conn:
             game = conn.execute("SELECT name FROM games WHERE id=?", (game_id,)).fetchone()
         if not game:
-            return
+            return False
         if self._confirm_action(
             "移除游戏",
             f"确定从 Tutler 中移除「{game['name']}」吗？",
@@ -4064,6 +4136,8 @@ class GameShelfWindow(QMainWindow):
             with db_connect() as conn:
                 conn.execute("DELETE FROM games WHERE id=?", (game_id,))
             self.refresh_games()
+            return True
+        return False
 
     def set_favorite(self, game_id, favorite):
         with db_connect() as conn:
